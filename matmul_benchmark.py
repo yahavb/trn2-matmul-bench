@@ -4,8 +4,9 @@ Square matmuls from 1024^3 → 32768^3 (powers of two) plus WAN-shaped GEMMs.
 Each shape × dtype combination is traced with torch_neuronx and timed on-device.
 Reports achieved TFLOP/s and MFU% (vs --peak-bf16-tflops / --peak-fp8-tflops).
 
-Target: single Trainium 2 die (2 NeuronCores = 1 logical NC).
-Set NEURON_RT_NUM_CORES=2 or NEURON_RT_LOGICAL_NC_CONFIG=1x1 to restrict to one die.
+Target: single Trainium 2 die (trn2.3xlarge = 4 NeuronCores, 1 device).
+Leave NEURON_RT_NUM_CORES unset to use all NCs on the die (NRT default).
+Valid values on TRN2 are 1 (single NC) or multiples of 8 (multi-die).
 """
 from __future__ import annotations
 

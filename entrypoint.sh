@@ -4,8 +4,10 @@
 set -eo pipefail
 
 export PATH="/bench/.venv/bin:/opt/aws/neuron/bin:$PATH"
-# Restrict to one TRN2 die: 2 NeuronCores = 1 logical NC.
-export NEURON_RT_NUM_CORES="${NEURON_RT_NUM_CORES:-2}"
+# TRN2 NRT requires NEURON_RT_NUM_CORES=1 or a multiple of 8.
+# On trn2.3xlarge (4 NeuronCores), leave it unset to use all cores on the die.
+# Override via env if needed (e.g. NEURON_RT_NUM_CORES=1 for single-NC).
+[[ -n "${NEURON_RT_NUM_CORES:-}" ]] && export NEURON_RT_NUM_CORES
 
 echo "=== neuron-ls ==="
 neuron-ls 2>&1 || echo "(neuron-ls not found)"
