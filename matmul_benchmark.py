@@ -60,6 +60,12 @@ _MXFP8_BLOCK       = 32      # OCP MXFP8 group / block size
 # Module definitions
 # ---------------------------------------------------------------------------
 
+class _NoOp(nn.Module):
+    """Passthrough — traces to a no-op kernel, measures pure dispatch+sync overhead."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x
+
+
 class _BF16Linear(nn.Module):
     def __init__(self, k: int, n: int) -> None:
         super().__init__()
@@ -191,6 +197,49 @@ def bench_one(
     }
 
 
+def bench_overhead(warmup: int, reps: int) -> dict[str, Any]:
+    """Measure pure dispatch+sync overhead: compiled no-op, small input tensor."""
+    case = "matmul.overhead"
+    M = 1
+    print(f"[bench] {case}  (no-op, M=1 bf16 passthrough)")
+    try:
+        mod = _NoOp()
+        x = torch.randn(M, 1, dtype=torch.bfloat16)
+        t0 = time.perf_counter()
+        compiled = torch_neuronx.trace(mod, (x,))
+        trace_s = time.perf_counter() - t0
+        print(f"[bench]   traced in {trace_s:.1f}s")
+    except Exception as exc:
+        print(f"[bench]   TRACE FAIL: {type(exc).__name__}: {exc}")
+        return {"case": case, "status": "trace_fail",
+                "error": f"{type(exc).__name__}: {exc}"[:512]}
+
+    device = torch_xla.device()
+    x_dev = x.to(device)
+
+    for _ in range(warmup):
+        compiled(x_dev)
+        torch_xla.sync()
+        xm.wait_device_ops()
+
+    times_us: list[float] = []
+    for _ in range(reps):
+        t0 = time.perf_counter()
+        compiled(x_dev)
+        torch_xla.sync()
+        xm.wait_device_ops()
+        times_us.append((time.perf_counter() - t0) * 1e6)
+
+    med = statistics.median(times_us)
+    print(f"[bench]   overhead median {med:.0f}µs  min {min(times_us):.0f}µs  max {max(times_us):.0f}µs")
+    return {
+        "case": case, "M": M, "K": 0, "N": 0, "dtype": "bf16",
+        "flops": 0, "trace_s": trace_s,
+        "median_us": med, "min_us": min(times_us), "max_us": max(times_us),
+        "achieved_tflops": 0.0, "mfu_pct": 0.0, "status": "ok",
+    }
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="TRN2 matmul peak benchmark")
     p.add_argument("--cases",  nargs="+", default=list(MATMUL_SHAPES.keys()),
@@ -214,7 +263,7 @@ def main() -> None:
     print(f"[bench] hostname={socket.gethostname()}")
     print(f"[bench] peak_bf16={args.peak_bf16} TFLOPS  peak_fp8={args.peak_fp8} TFLOPS")
 
-    results: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = [bench_overhead(args.warmup, args.reps)]
     for case in args.cases:
         if case not in MATMUL_SHAPES:
             print(f"[bench] unknown case, skipping: {case}")

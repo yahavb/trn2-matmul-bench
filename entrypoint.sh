@@ -5,9 +5,10 @@ set -eo pipefail
 
 export PATH="/bench/.venv/bin:/opt/aws/neuron/bin:$PATH"
 # TRN2 NRT requires NEURON_RT_NUM_CORES=1 or a multiple of 8.
-# On trn2.3xlarge (4 NeuronCores), leave it unset to use all cores on the die.
-# Override via env if needed (e.g. NEURON_RT_NUM_CORES=1 for single-NC).
-[[ -n "${NEURON_RT_NUM_CORES:-}" ]] && export NEURON_RT_NUM_CORES
+# libneuronxla PJRT auto-detects logical-neuroncore-config=2 from hardware and
+# passes that to nrt_allocate_neuron_cores, which rejects 2 as invalid.
+# Set 1 explicitly so the PJRT uses a single logical NC (all its physical sub-units).
+export NEURON_RT_NUM_CORES="${NEURON_RT_NUM_CORES:-1}"
 
 echo "=== neuron-ls ==="
 neuron-ls 2>&1 || echo "(neuron-ls not found)"
