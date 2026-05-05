@@ -4,11 +4,16 @@
 set -eo pipefail
 
 export PATH="/bench/.venv/bin:/opt/aws/neuron/bin:$PATH"
-# TRN2 NRT requires NEURON_RT_NUM_CORES=1 or a multiple of 8.
-# libneuronxla PJRT auto-detects logical-neuroncore-config=2 from hardware and
-# passes that to nrt_allocate_neuron_cores, which rejects 2 as invalid.
-# Set 1 explicitly so the PJRT uses a single logical NC (all its physical sub-units).
-export NEURON_RT_NUM_CORES="${NEURON_RT_NUM_CORES:-1}"
+# NEURON_RT_NUM_CORES note (TRN2 / Beta-2 NRT 2.x.47730.0):
+#   The Beta-2 NRT rejects NEURON_RT_NUM_CORES=2 with:
+#     "must request one core, or the whole device (multiple of 8)"
+#   trn2.3xlarge has 4 physical NeuronCores in 2 logical NCs (lnc=2).
+#   With =1: NRT accepts; bench runs on 1 physical NC (~47 TFLOPS for sq_16384).
+#   With UNSET: NRT should default to the full logical NC; prior runs showed
+#     ~130 TFLOPS for sq_16384 — hypothesis being tested overnight.
+#   Override via the Batch job definition env or the NEURON_RT_NUM_CORES env var.
+[[ -n "${NEURON_RT_NUM_CORES:-}" ]] && export NEURON_RT_NUM_CORES
+echo "[bench] NEURON_RT_NUM_CORES=${NEURON_RT_NUM_CORES:-(unset, NRT default)}"
 
 echo "=== neuron-ls ==="
 neuron-ls 2>&1 || echo "(neuron-ls not found)"
