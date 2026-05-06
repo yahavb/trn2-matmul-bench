@@ -291,6 +291,10 @@ def bench_one(
 
     device = _get_device()
     x_dev = x.to(device)
+    # compile path: Dynamo traces on the first forward call and must see consistent
+    # devices for inputs and weights. trace path needs CPU model for XLA AOT.
+    if method != "trace":
+        mod.to(device)
 
     try:
         times_us = _time_compiled(compiled, x_dev, warmup, reps)
