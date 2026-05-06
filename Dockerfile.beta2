@@ -21,21 +21,18 @@ RUN /usr/local/bin/uv venv /bench/.venv && \
         "torch~=2.10.0" \
         --extra-index-url https://download.pytorch.org/whl/cpu
 
-# Install Beta 2 wheels from /workspace/ (baked into the base image).
-# --no-deps: avoid pulling an incompatible torch from the public Neuron index.
-RUN /usr/local/bin/uv pip install --python /bench/.venv --no-deps \
+# Install Beta 2 wheels WITH deps so transitive requirements (ml_dtypes, packaging,
+# numpy, etc.) are satisfied. torch 2.10.0+cpu is already in the venv, so any
+# torch~=2.10.0 constraint from these wheels will be resolved without reinstalling.
+RUN /usr/local/bin/uv pip install --python /bench/.venv \
         /workspace/neuron_torch_mlir_wheels/*.whl \
         /workspace/nki_wheels/*.whl \
         /workspace/neuronx_cc_wheels/*.whl
 
-# Install runtime deps of torch_neuron_eager that --no-deps skipped.
-# packaging: imported by torch_neuronx.python_ops at torch init time.
-# numpy: required for Python 3.12 (conditional dep in pyproject).
-RUN /usr/local/bin/uv pip install --python /bench/.venv packaging "numpy>=2"
-
 # Install torch_neuron_eager (Beta 2 torch-neuronx) — registers backend="neuron".
 # Must use -e (editable): setup.py references csrc/ via absolute paths that only
 # resolve when the build runs in-place inside /workspace/torch_neuron_eager/.
+# --no-deps: its only runtime dep (torch~=2.10.0) is already installed above.
 RUN /usr/local/bin/uv pip install --python /bench/.venv --no-deps \
         -e /workspace/torch_neuron_eager
 
