@@ -176,7 +176,9 @@ _COMPILE_BACKEND: str = "openxla"  # overridden in main() after arg parse
 
 def _compile_jit(mod: nn.Module, x: torch.Tensor) -> tuple[Any, float]:
     """JIT compile via torch.compile; backend controlled by --compile-backend."""
-    compiled = torch.compile(mod, backend=_COMPILE_BACKEND)
+    # dynamic=False: neuronx-cc rejects unbounded dynamism; force all dims static.
+    # openxla doesn't require this but it's harmless there.
+    compiled = torch.compile(mod, backend=_COMPILE_BACKEND, dynamic=False)
     return compiled, 0.0
 
 
