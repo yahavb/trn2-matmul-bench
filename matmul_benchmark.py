@@ -3,8 +3,9 @@
 Two compilation paths are measured independently for each shape × dtype:
   trace   — torch_neuronx.trace(): AOT XLA compilation, fixed input shape baked
              into a .neff artifact; trace time is reported separately.
-  compile — torch.compile(backend="openxla"): JIT, compilation happens on the
-             first warmup call; closer to the production eager path.
+  compile — torch.compile(backend=...): JIT, compilation happens on the
+             first warmup call; backend auto-detected or set via --compile-backend.
+             Defaults to "neuron" (Beta 2 torch_neuron_eager) or "openxla" (public).
 
 Square matmuls from 1024^3 → 32768^3 (powers of two) plus WAN-shaped GEMMs.
 Reports achieved TFLOP/s and MFU% (vs --peak-bf16-tflops / --peak-fp8-tflops).
@@ -31,6 +32,20 @@ import torch.nn as nn
 import torch_neuronx
 import torch_xla
 import torch_xla.core.xla_model as xm
+
+_HAS_TRACE = hasattr(torch_neuronx, "trace")
+
+
+def _sync_device() -> None:
+    """Sync and wait for all in-flight device ops.
+
+    Prefers torch_neuronx.synchronize() (Beta 2) over the torch_xla pair.
+    """
+    if hasattr(torch_neuronx, "synchronize"):
+        torch_neuronx.synchronize()
+    else:
+        torch_xla.sync()
+        xm.wait_device_ops()
 
 
 MATMUL_SHAPES: dict[str, tuple[int, int, int]] = {
@@ -141,16 +156,18 @@ def _compile_trace(mod: nn.Module, x: torch.Tensor) -> tuple[Any, float]:
     return compiled, time.perf_counter() - t0
 
 
-def _compile_openxla(mod: nn.Module, x: torch.Tensor) -> tuple[Any, float]:
-    """JIT compile via torch.compile(backend='openxla'); compilation deferred to
-    first call.  Returns (callable, 0.0) — trace_s is not applicable."""
-    compiled = torch.compile(mod, backend="openxla")
+_COMPILE_BACKEND: str = "openxla"  # overridden in main() after arg parse
+
+
+def _compile_jit(mod: nn.Module, x: torch.Tensor) -> tuple[Any, float]:
+    """JIT compile via torch.compile; backend controlled by --compile-backend."""
+    compiled = torch.compile(mod, backend=_COMPILE_BACKEND)
     return compiled, 0.0
 
 
 _METHODS: dict[str, Any] = {
     "trace":   _compile_trace,
-    "compile": _compile_openxla,
+    "compile": _compile_jit,
 }
 
 
@@ -166,15 +183,13 @@ def _time_compiled(
 ) -> list[float]:
     for _ in range(warmup):
         compiled(x_dev)
-        torch_xla.sync()
-        xm.wait_device_ops()
+        _sync_device()
 
     times_us: list[float] = []
     for _ in range(reps):
         t0 = time.perf_counter()
         compiled(x_dev)
-        torch_xla.sync()
-        xm.wait_device_ops()
+        _sync_device()
         times_us.append((time.perf_counter() - t0) * 1e6)
     return times_us
 
@@ -293,10 +308,15 @@ def main() -> None:
                    help="Shape keys to benchmark (default: all)")
     p.add_argument("--dtypes",  nargs="+", default=["bf16", "fp8", "mxfp8"],
                    choices=list(_DTYPE_MODULES))
-    p.add_argument("--methods", nargs="+", default=["trace", "compile"],
+    _default_backend = "neuron" if not _HAS_TRACE else "openxla"
+    p.add_argument("--compile-backend", default=_default_backend, dest="compile_backend",
+                   help="torch.compile backend for the 'compile' method "
+                        "(auto-detected: 'neuron' for Beta 2, 'openxla' for public)")
+    _default_methods = ["compile"] if not _HAS_TRACE else ["trace", "compile"]
+    p.add_argument("--methods", nargs="+", default=_default_methods,
                    choices=list(_METHODS),
                    help="Compilation paths: trace=torch_neuronx.trace, "
-                        "compile=torch.compile(backend='openxla')")
+                        "compile=torch.compile(backend=compile_backend)")
     p.add_argument("--warmup", type=int, default=3)
     p.add_argument("--reps",   type=int, default=10)
     p.add_argument("--peak-bf16-tflops", type=float, default=_PEAK_BF16_DEFAULT,
@@ -306,11 +326,17 @@ def main() -> None:
     p.add_argument("--output", default="/tmp/trn2_matmul_bench.json")
     args = p.parse_args()
 
+    global _COMPILE_BACKEND
+    _COMPILE_BACKEND = args.compile_backend
+    if "trace" in args.methods and not _HAS_TRACE:
+        print("[bench] WARNING: 'trace' requested but torch_neuronx.trace not available; skipping")
+        args.methods = [m for m in args.methods if m != "trace"]
+
     print(f"[bench] python={sys.version.split()[0]}"
           f"  torch={torch.__version__}"
           f"  torch_neuronx={getattr(torch_neuronx, '__version__', '?')}")
     print(f"[bench] hostname={socket.gethostname()}")
-    print(f"[bench] methods={args.methods}  dtypes={args.dtypes}")
+    print(f"[bench] methods={args.methods}  dtypes={args.dtypes}  compile_backend={_COMPILE_BACKEND}")
     print(f"[bench] peak_bf16={args.peak_bf16} TFLOPS  peak_fp8={args.peak_fp8} TFLOPS")
 
     results: list[dict[str, Any]] = bench_overhead(args.warmup, args.reps, args.methods)

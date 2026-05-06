@@ -1,0 +1,39 @@
+FROM 421672808698.dkr.ecr.us-east-1.amazonaws.com/concourse-release-0461d3b:latest
+
+ENV PYTHONUNBUFFERED=1
+# Override Beta 2 image's UV_PROJECT_ENVIRONMENT which points to
+# /workspace/torch_neuron_eager/.venv — redirect to our isolated venv.
+ENV UV_PROJECT_ENVIRONMENT=/bench/.venv
+
+# Copy Neuron runtime .so files to /usr/local/lib so they are discoverable
+# without hardcoded /opt/aws/neuron/lib paths; ldconfig registers them.
+RUN find /opt/aws/neuron/lib -maxdepth 1 -name '*.so*' \
+        | xargs -I{} cp -P {} /usr/local/lib/ && \
+    ldconfig
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /bench
+
+# Create venv and install torch CPU wheel (Beta 2 torch_neuron_eager requires torch~=2.10).
+RUN /usr/local/bin/uv venv /bench/.venv && \
+    /usr/local/bin/uv pip install --python /bench/.venv \
+        "torch~=2.10.0" \
+        --extra-index-url https://download.pytorch.org/whl/cpu
+
+# Install Beta 2 wheels from /workspace/ (baked into the base image).
+# --no-deps: avoid pulling an incompatible torch from the public Neuron index.
+RUN /usr/local/bin/uv pip install --python /bench/.venv --no-deps \
+        /workspace/neuron_torch_mlir_wheels/*.whl \
+        /workspace/nki_wheels/*.whl \
+        /workspace/neuronx_cc_wheels/*.whl
+
+# Install torch_neuron_eager (Beta 2 torch-neuronx) — registers backend="neuron".
+RUN /usr/local/bin/uv pip install --python /bench/.venv --no-deps \
+        /workspace/torch_neuron_eager
+
+COPY matmul_benchmark.py entrypoint.beta2.sh ./
+RUN chmod +x entrypoint.beta2.sh
+
+ENTRYPOINT ["/bin/bash", "-c"]
+CMD ["/bench/entrypoint.beta2.sh"]
