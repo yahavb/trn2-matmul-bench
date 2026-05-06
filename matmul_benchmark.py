@@ -30,10 +30,23 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch_neuronx
-import torch_xla
-import torch_xla.core.xla_model as xm
 
 _HAS_TRACE = hasattr(torch_neuronx, "trace")
+
+# Beta 2 (torch_neuron_eager) registers torch.device("neuron") — no torch_xla.
+# Public torch-neuronx uses XLA as the device backend.
+try:
+    import torch_xla
+    import torch_xla.core.xla_model as xm
+    _XLA_AVAILABLE = True
+except ImportError:
+    _XLA_AVAILABLE = False
+
+
+def _get_device() -> torch.device:
+    if _XLA_AVAILABLE:
+        return torch_xla.device()
+    return torch.device("neuron:0")
 
 
 def _sync_device() -> None:
@@ -43,9 +56,11 @@ def _sync_device() -> None:
     """
     if hasattr(torch_neuronx, "synchronize"):
         torch_neuronx.synchronize()
-    else:
+    elif _XLA_AVAILABLE:
         torch_xla.sync()
         xm.wait_device_ops()
+    else:
+        raise RuntimeError("no sync API available")
 
 
 MATMUL_SHAPES: dict[str, tuple[int, int, int]] = {
@@ -202,7 +217,7 @@ def bench_overhead(warmup: int, reps: int, methods: list[str]) -> list[dict[str,
     """No-op passthrough: zero FLOPs, measures pure dispatch+sync overhead."""
     case = "matmul.overhead"
     x = torch.randn(1, 1, dtype=torch.bfloat16)
-    device = torch_xla.device()
+    device = _get_device()
     x_dev = x.to(device)
     out: list[dict[str, Any]] = []
 
@@ -274,7 +289,7 @@ def bench_one(
         return {**base, "status": "compile_fail",
                 "error": f"{type(exc).__name__}: {exc}"[:512]}
 
-    device = torch_xla.device()
+    device = _get_device()
     x_dev = x.to(device)
 
     try:
