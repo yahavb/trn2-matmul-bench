@@ -1,0 +1,7 @@
+# Extends the matmul-bench-beta2 image — no reinstallation needed.
+FROM 975894387485.dkr.ecr.sa-east-1.amazonaws.com/odyssey_wan_benchmarks_trainium:matmul-bench-beta2
+
+COPY nc_probe.py entrypoint.probe.sh ./
+RUN chmod +x entrypoint.probe.sh
+
+CMD ["/bench/entrypoint.probe.sh"]
