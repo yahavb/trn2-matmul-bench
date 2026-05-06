@@ -29,8 +29,10 @@ RUN /usr/local/bin/uv pip install --python /bench/.venv --no-deps \
         /workspace/neuronx_cc_wheels/*.whl
 
 # Install torch_neuron_eager (Beta 2 torch-neuronx) — registers backend="neuron".
+# Must use -e (editable): setup.py references csrc/ via absolute paths that only
+# resolve when the build runs in-place inside /workspace/torch_neuron_eager/.
 RUN /usr/local/bin/uv pip install --python /bench/.venv --no-deps \
-        /workspace/torch_neuron_eager
+        -e /workspace/torch_neuron_eager
 
 COPY matmul_benchmark.py entrypoint.beta2.sh ./
 RUN chmod +x entrypoint.beta2.sh
