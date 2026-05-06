@@ -28,6 +28,11 @@ RUN /usr/local/bin/uv pip install --python /bench/.venv --no-deps \
         /workspace/nki_wheels/*.whl \
         /workspace/neuronx_cc_wheels/*.whl
 
+# Install runtime deps of torch_neuron_eager that --no-deps skipped.
+# packaging: imported by torch_neuronx.python_ops at torch init time.
+# numpy: required for Python 3.12 (conditional dep in pyproject).
+RUN /usr/local/bin/uv pip install --python /bench/.venv packaging "numpy>=2"
+
 # Install torch_neuron_eager (Beta 2 torch-neuronx) — registers backend="neuron".
 # Must use -e (editable): setup.py references csrc/ via absolute paths that only
 # resolve when the build runs in-place inside /workspace/torch_neuron_eager/.
