@@ -6,43 +6,53 @@ Reports achieved TFLOP/s and MFU% against the logical-NC peak.
 
 ## Hardware
 
-`trn2.3xlarge` — 1 Trainium 2 die:
+`trn2.3xlarge` — 1 Trainium 2 chip, 2 dies:
 
 | | |
 |---|---|
 | Neuron devices (PCI) | 1 |
-| Physical NeuronCores | 4 (IDs 0–3, NeuronCore-v3) |
-| Logical NeuronCore config | lnc=2 → **2 logical NCs** (each = 2 physical NCs) |
-| HBM | 96 GB (48 GB per logical NC) |
-| Peak bf16 — full die | ~333 TFLOPS |
+| Dies per chip | 2 |
+| **Physical NeuronCores** | **8** (4 per die, NeuronCore-v3) |
+| Logical NeuronCore config | lnc=2 (default) → **4 logical NCs** (each = 2 physical NCs) |
+| HBM | 96 GB (24 GB per logical NC) |
+| Peak bf16 — full chip | ~667 TFLOPS |
+| Peak bf16 — per die | ~333 TFLOPS |
 | **Peak bf16 — per logical NC** | **~167 TFLOPS** |
 | Peak fp8 — per logical NC | ~334 TFLOPS |
 
-`torch_neuronx.device_count()` returns **4** — one entry per **physical** NeuronCore, not per logical NC.
-Each device reports `total_memory = 24 GiB`; 4 × 24 = 96 GiB total ✓.
-With lnc=2 the runtime groups physical NCs in pairs: {0,1} → LNC 0, {2,3} → LNC 1.
+`torch_neuronx.device_count()` returns the count of **logical NCs at the current lnc setting**:
+
+| env | `device_count()` | meaning |
+|---|---:|---|
+| (default) | 4 | 4 logical NCs (lnc=2) |
+| `NEURON_LOGICAL_NC_CONFIG=1` | 8 | 8 physical NCs (no grouping) |
+
+The default `neuron-ls` output displays the *logical* view (`| 0 | 4 | 0-3 | 96 GB |`)
+which hides the underlying 8 physical cores; setting `NEURON_LOGICAL_NC_CONFIG=1`
+reveals `| 0 | 8 | 0-7 | 96 GB |`.
 
 ## NC topology — verified experimentally
 
-`nc_probe.py` ran sq_16384 bf16 on 1–4 physical NC slots simultaneously, using separate
-OS processes each restricted via `NEURON_RT_VISIBLE_CORES`.
-`NEURON_RT_VISIBLE_CORES=K` exposes the **logical NC that contains physical NC K**.
-Because lnc=2, slots 0 and 1 both resolve to LNC 0, and slots 2 and 3 to LNC 1.
+`nc_probe.py` ran sq_16384 bf16 on 1–4 logical NCs simultaneously, using separate
+OS processes each restricted to one LNC via `NEURON_RT_VISIBLE_CORES` (logical NC index).
 
-| Config | VISIBLE_CORES | Maps to | Aggregate TF/s | Scaling |
-|---|---|---|---:|---|
-| 1 slot — slot 0 | `0` | LNC 0 | 134.7 | 1.00× baseline |
-| 2 slots — slots 0+1 | `0`, `1` | LNC 0 + LNC 0 | 228.5 | 1.70× — same LNC, intra-LNC contention |
-| 2 slots — slots 0+2 | `0`, `2` | LNC 0 + LNC 1 | **268.2** | **2.00×** — different LNCs, fully independent |
-| 4 slots — slots 0+1+2+3 | `0`,`1`,`2`,`3` | 2×LNC0 + 2×LNC1 | 455.1 | 3.38× |
+| Config | VISIBLE_CORES | Aggregate TF/s | Scaling |
+|---|---|---:|---|
+| 1 LNC | `0` | 134.7 | 1.00× baseline |
+| 2 LNCs, same die (0+1) | `0`, `1` | 228.5 | 1.70× — intra-die HBM contention |
+| 2 LNCs, different dies (0+2) | `0`, `2` | **268.2** | **2.00×** — fully independent |
+| 4 LNCs (full chip) | `0`,`1`,`2`,`3` | 455.1 | 3.38× — 2 contended pairs |
+
+The (0,1) vs (0,2) asymmetry pins down the die layout:
+LNCs 0,1 sit on die 0 and LNCs 2,3 on die 1.
 
 **Key findings:**
 
 - A single `torch.compile(backend="neuron")` process uses exactly **1 logical NC** (2 physical NCs, ~167 TFLOPS peak).
   134.7 / 167 = **80.7% MFU** at sq_16384.
-- The two logical NCs are fully independent: running one process per LNC gives a perfect **2.00× aggregate**.
-- Running two processes on the same logical NC degrades each to ~114 TF/s (~85% efficiency, 1.70× aggregate).
-- Full-die aggregate at sq_16384: **455 TF/s** across 4 concurrent processes (2 per LNC).
+- Cross-die LNCs are fully independent (2.00× scaling at sq_16384).
+- Same-die LNCs share HBM bandwidth — each drops to ~114 TF/s (~85% efficiency).
+- Full-chip aggregate at sq_16384: **455 TF/s** (not 4×134=537), limited by intra-die contention.
 
 ## Two benchmark paths
 
@@ -51,7 +61,7 @@ Because lnc=2, slots 0 and 1 both resolve to LNC 0, and slots 2 and 3 to LNC 1.
 | Package | `torch-neuronx==2.9.0.2.13.24727` (public Neuron pip index) | `torch_neuron_eager` from `/workspace/` in Torch Neuron Beta 2 base image |
 | Compilation | `torch_neuronx.trace()` — AOT XLA | `torch.compile(backend="neuron")` — JIT |
 | NeuronCores used | **1 physical NC** | **1 logical NC (2 physical NCs)** |
-| Effective peak (bf16) | **~83 TFLOPS** (1/4 die) | **~167 TFLOPS** (1/2 die) |
+| Effective peak (bf16) | **~83 TFLOPS** (1/8 chip) | **~167 TFLOPS** (1/4 chip) |
 | Device | `torch_xla.device()` (XLA) | `torch.device("neuron:0")` |
 | Sync | `torch_xla.sync()` + `xm.wait_device_ops()` | `torch_neuronx.synchronize()` |
 | torch version | `torch>=2.1` (CPU wheel) | `torch==2.10.0+cpu` |
