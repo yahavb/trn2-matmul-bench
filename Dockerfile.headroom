@@ -1,0 +1,31 @@
+FROM 421672808698.dkr.ecr.us-east-1.amazonaws.com/concourse-release-0461d3b:latest
+
+ENV PYTHONUNBUFFERED=1
+ENV UV_PROJECT_ENVIRONMENT=/bench/.venv
+
+RUN find /opt/aws/neuron/lib -maxdepth 1 -name '*.so*' \
+        | xargs -I{} cp -P {} /usr/local/lib/ && \
+    ldconfig
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /bench
+
+RUN /usr/local/bin/uv venv /bench/.venv && \
+    /usr/local/bin/uv pip install --python /bench/.venv \
+        "torch~=2.10.0" \
+        --extra-index-url https://download.pytorch.org/whl/cpu
+
+RUN /usr/local/bin/uv pip install --python /bench/.venv \
+        /workspace/neuron_torch_mlir_wheels/*.whl \
+        /workspace/nki_wheels/*.whl \
+        /workspace/neuronx_cc_wheels/*.whl
+
+RUN /usr/local/bin/uv pip install --python /bench/.venv --no-deps \
+        -e /workspace/torch_neuron_eager
+
+COPY mfu_headroom.py nc_scaling.py entrypoint.headroom.sh ./
+RUN chmod +x entrypoint.headroom.sh
+
+ENTRYPOINT ["/bin/bash", "-c"]
+CMD ["/bench/entrypoint.headroom.sh"]
