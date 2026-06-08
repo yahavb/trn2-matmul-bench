@@ -151,9 +151,14 @@ def main() -> None:
     dist.init_process_group("neuron")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    torch.neuron.set_device(rank)
 
-    device = f"neuron:{rank}"
+    # With lnc=2, logical cores 0,1 are on ND0 and 2,3 are on ND1.
+    # Map each rank to a different ND by striding by 2.
+    nc_per_nd = 2  # logical NCs per ND with lnc=2
+    device_id = rank * nc_per_nd
+    torch.neuron.set_device(device_id)
+
+    device = f"neuron:{device_id}"
     _ = torch.zeros(1, device=device)
 
     if rank == 0:
