@@ -108,6 +108,34 @@ def bench_one(
     }
 
 
+def bench_sustain(
+    mod: nn.Module,
+    x: torch.Tensor,
+    duration_s: float,
+    rank: int,
+) -> dict[str, Any]:
+    """Run compiled model in a tight loop for a fixed duration."""
+    torch._dynamo.reset()
+    compiled = torch.compile(mod, backend="neuron", dynamic=False)
+
+    # Warmup
+    for _ in range(5):
+        compiled(x)
+        _sync()
+
+    dist.barrier()
+
+    count = 0
+    t_start = time.perf_counter()
+    while time.perf_counter() - t_start < duration_s:
+        compiled(x)
+        _sync()
+        count += 1
+
+    elapsed = time.perf_counter() - t_start
+    return {"count": count, "elapsed_s": elapsed, "iters_per_sec": count / elapsed}
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Distributed matmul + collective benchmark")
     p.add_argument("--sizes", nargs="+", type=int,
@@ -115,6 +143,8 @@ def main() -> None:
                    help="Square matrix sizes (M=K=N)")
     p.add_argument("--warmup", type=int, default=5)
     p.add_argument("--reps", type=int, default=20)
+    p.add_argument("--sustain", type=int, default=0,
+                   help="Seconds to run sustained load (0=off). Runs largest size in a tight loop.")
     p.add_argument("--output", default="/tmp/collective_bench.json")
     args = p.parse_args()
 
@@ -182,6 +212,23 @@ def main() -> None:
             print(f"[bench]   matmul+red_scatter: {r_rs['median_us']:>8.0f} us  "
                   f"{r_rs['achieved_tflops']:.1f} TF/s  MFU={r_rs['mfu_pct']:.1f}%  "
                   f"comm_overhead={overhead:.1f}%")
+
+    # Sustained load: compile once, hammer for --sustain seconds
+    if args.sustain > 0:
+        size = args.sizes[-1]
+        x = torch.randn(size, size, dtype=torch.bfloat16, device=device)
+        flops = 2 * size * size * size
+
+        mod_ar = MatmulAllReduce(size, group).to(device)
+        if rank == 0:
+            print(f"\n[bench] SUSTAINED LOAD: size={size} for {args.sustain}s "
+                  f"(matmul+all_reduce) — watch neuron-top now")
+        s = bench_sustain(mod_ar, x, args.sustain, rank)
+        if rank == 0:
+            tflops = flops * s["iters_per_sec"] / 1e12
+            print(f"[bench]   {s['count']} iters in {s['elapsed_s']:.1f}s  "
+                  f"= {s['iters_per_sec']:.1f} it/s  "
+                  f"= {tflops:.1f} TF/s  MFU={tflops/PEAK_PER_ND*100:.1f}%")
 
     if rank == 0:
         print(f"\n\n{'=' * 90}")

@@ -39,6 +39,7 @@ spec:
                 --sizes 4096 8192 16384 \
                 --warmup 5 \
                 --reps 20 \
+                --sustain 60 \
                 --output /tmp/collective_bench.json \
                 2>&1 | tee /tmp/collective_bench.log
 
