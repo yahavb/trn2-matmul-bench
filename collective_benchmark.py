@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Neuron collective ops microbenchmark — measures latency and bandwidth of
-all_reduce, all_gather, and reduce_scatter across 2 NDs on trn2.48xlarge.
+"""Distributed matmul + collective benchmark for 2 NDs on trn2.48xlarge.
 
-Uses torch.compile(backend="neuron") with functional collectives.
+Simulates tensor-parallel workload: each ND computes a large matmul then
+performs a collective (all_reduce / reduce_scatter) on the result.
+This saturates both TensorE (compute) and CC/NeuronLink (communication).
+
 Launched via torchrun: torchrun --nproc_per_node=2 collective_benchmark.py
 
-Reports per-op latency (us), algorithm bandwidth (GB/s), and bus bandwidth (GB/s).
+Reports:
+  - matmul-only TFLOPS per ND
+  - matmul+collective TFLOPS per ND (effective throughput with comm overhead)
+  - collective overhead as % of total time
 """
 from __future__ import annotations
 
@@ -21,188 +26,95 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
-import torch.profiler
+import torch.nn as nn
 import torch_neuronx  # noqa: F401
-from torch_neuronx.profiling import NeuronConfig, NeuronProfiler, ProfileMode
 
 
 def _sync():
     torch.neuron.synchronize()
 
 
-def _msg_sizes_bytes(start_exp: int, end_exp: int) -> list[int]:
-    return [2**e for e in range(start_exp, end_exp + 1)]
+PEAK_PER_ND = 167.0  # TFLOPS bf16 per ND (1 logical NC with lnc=2)
 
 
-def _make_all_reduce(group):
-    def fn(x):
-        return funcol.all_reduce(x, reduceOp="sum", group=group)
-    return fn
+class MatmulAllReduce(nn.Module):
+    def __init__(self, size: int, group):
+        super().__init__()
+        self.linear = nn.Linear(size, size, bias=False, dtype=torch.bfloat16)
+        self.group = group
+
+    def forward(self, x):
+        y = self.linear(x)
+        return funcol.all_reduce(y, reduceOp="sum", group=self.group)
 
 
-def _make_all_gather(group):
-    def fn(x):
-        return funcol.all_gather_tensor(x, gather_dim=0, group=group)
-    return fn
+class MatmulReduceScatter(nn.Module):
+    def __init__(self, size: int, group):
+        super().__init__()
+        self.linear = nn.Linear(size, size, bias=False, dtype=torch.bfloat16)
+        self.group = group
+
+    def forward(self, x):
+        y = self.linear(x)
+        return funcol.reduce_scatter_tensor(y, "sum", scatter_dim=0, group=self.group)
 
 
-def _make_reduce_scatter(group):
-    def fn(x):
-        return funcol.reduce_scatter_tensor(x, "sum", scatter_dim=0, group=group)
-    return fn
+class MatmulOnly(nn.Module):
+    def __init__(self, size: int):
+        super().__init__()
+        self.linear = nn.Linear(size, size, bias=False, dtype=torch.bfloat16)
+
+    def forward(self, x):
+        return self.linear(x)
 
 
-OPS = {
-    "all_reduce": _make_all_reduce,
-    "all_gather": _make_all_gather,
-    "reduce_scatter": _make_reduce_scatter,
-}
-
-
-def _algbw(size_bytes: int, latency_s: float) -> float:
-    """Algorithm bandwidth in GB/s."""
-    return size_bytes / latency_s / 1e9 if latency_s > 0 else 0.0
-
-
-def _busbw(op: str, size_bytes: int, latency_s: float, world_size: int) -> float:
-    """Bus bandwidth in GB/s — corrects for ring/tree protocol overhead."""
-    n = world_size
-    if n <= 1:
-        return 0.0
-    algbw = _algbw(size_bytes, latency_s)
-    if op == "all_reduce":
-        return algbw * 2 * (n - 1) / n
-    elif op in ("all_gather", "reduce_scatter"):
-        return algbw * (n - 1) / n
-    return algbw
-
-
-def bench_collective(
-    op_name: str,
-    size_bytes: int,
-    rank: int,
-    world_size: int,
+def bench_one(
+    name: str,
+    mod: nn.Module,
+    x: torch.Tensor,
+    flops: int,
     warmup: int,
     reps: int,
 ) -> dict[str, Any]:
-    """Benchmark a single collective op at a given message size.
-
-    Each call compiles a fresh function to avoid Dynamo recompile limits
-    when sweeping different tensor sizes.
-    """
-    device = f"neuron:{rank}"
-    num_elements = size_bytes // 2  # bf16 = 2 bytes per element
-
-    if op_name == "reduce_scatter":
-        num_elements = (num_elements // world_size) * world_size
-
-    x = torch.randn(num_elements, dtype=torch.bfloat16, device=device)
-    actual_bytes = num_elements * 2
-
-    # Reset Dynamo before each size so we get a fresh compilation (no recompile limit)
     torch._dynamo.reset()
-
-    group = dist.group.WORLD
-    op_fn = OPS[op_name](group)
-    compiled_fn = torch.compile(op_fn, backend="neuron", dynamic=False)
+    compiled = torch.compile(mod, backend="neuron", dynamic=False)
 
     for _ in range(warmup):
-        compiled_fn(x)
+        compiled(x)
         _sync()
 
     dist.barrier()
 
     times_us: list[float] = []
     for _ in range(reps):
-        dist.barrier()
         t0 = time.perf_counter()
-        compiled_fn(x)
+        compiled(x)
         _sync()
         t1 = time.perf_counter()
         times_us.append((t1 - t0) * 1e6)
 
     med_us = statistics.median(times_us)
-    med_s = med_us / 1e6
-    algbw = _algbw(actual_bytes, med_s)
-    busbw = _busbw(op_name, actual_bytes, med_s, world_size)
+    achieved_tflops = flops / med_us / 1e6
+    mfu_pct = achieved_tflops / PEAK_PER_ND * 100.0
 
     return {
-        "op": op_name,
-        "size_bytes": actual_bytes,
-        "num_elements": num_elements,
-        "dtype": "bf16",
+        "name": name,
         "median_us": med_us,
         "min_us": min(times_us),
         "max_us": max(times_us),
-        "algbw_gbps": algbw,
-        "busbw_gbps": busbw,
+        "achieved_tflops": achieved_tflops,
+        "mfu_pct": mfu_pct,
         "times_us": times_us,
     }
 
 
-def _run_profiled(
-    op_name: str,
-    size_bytes: int,
-    rank: int,
-    world_size: int,
-    warmup: int,
-    reps: int,
-    profile_dir: str,
-) -> None:
-    """Run a single op+size with Neuron device profiling enabled."""
-    device = f"neuron:{rank}"
-    num_elements = size_bytes // 2
-    if op_name == "reduce_scatter":
-        num_elements = (num_elements // world_size) * world_size
-
-    x = torch.randn(num_elements, dtype=torch.bfloat16, device=device)
-
-    torch._dynamo.reset()
-    group = dist.group.WORLD
-    op_fn = OPS[op_name](group)
-    compiled_fn = torch.compile(op_fn, backend="neuron", dynamic=False)
-
-    # Warmup outside profiler
-    for _ in range(warmup):
-        compiled_fn(x)
-        _sync()
-
-    dist.barrier()
-
-    neuron_config = NeuronConfig(
-        modes=[ProfileMode.DEVICE, ProfileMode.RUNTIME],
-        profile_output_dir=profile_dir,
-    )
-    neuron_profiler = NeuronProfiler(neuron_config)
-
-    with torch.profiler.profile(
-        activities=[torch.profiler.ProfilerActivity.CPU],
-        schedule=torch.profiler.schedule(wait=0, warmup=1, active=reps - 1),
-        experimental_config=neuron_config,
-        on_trace_ready=lambda p: neuron_profiler.export_trace(p),
-    ) as prof:
-        for _ in range(reps):
-            compiled_fn(x)
-            _sync()
-            prof.step()
-
-    if rank == 0:
-        print(f"[coll] profile written to {profile_dir}")
-
-
 def main() -> None:
-    p = argparse.ArgumentParser(description="Neuron collective ops benchmark")
-    p.add_argument("--ops", nargs="+", default=list(OPS.keys()),
-                   choices=list(OPS.keys()))
-    p.add_argument("--min-exp", type=int, default=10,
-                   help="Min message size as 2^N bytes (default: 10 = 1KB)")
-    p.add_argument("--max-exp", type=int, default=30,
-                   help="Max message size as 2^N bytes (default: 30 = 1GB)")
+    p = argparse.ArgumentParser(description="Distributed matmul + collective benchmark")
+    p.add_argument("--sizes", nargs="+", type=int,
+                   default=[4096, 8192, 16384],
+                   help="Square matrix sizes (M=K=N)")
     p.add_argument("--warmup", type=int, default=5)
     p.add_argument("--reps", type=int, default=20)
-    p.add_argument("--profile", action="store_true",
-                   help="Enable Neuron device profiling for the largest message size")
-    p.add_argument("--profile-dir", default="/tmp/neuron_profile", dest="profile_dir")
     p.add_argument("--output", default="/tmp/collective_bench.json")
     args = p.parse_args()
 
@@ -215,68 +127,73 @@ def main() -> None:
     _ = torch.zeros(1, device=device)
 
     if rank == 0:
-        print(f"[coll] hostname={socket.gethostname()}")
-        print(f"[coll] python={sys.version.split()[0]}"
+        print(f"[bench] hostname={socket.gethostname()}")
+        print(f"[bench] python={sys.version.split()[0]}"
               f"  torch={torch.__version__}"
               f"  torch_neuronx={getattr(torch_neuronx, '__version__', '?')}")
-        print(f"[coll] world_size={world_size}  backend=neuron")
-        print(f"[coll] ops={args.ops}  sizes=2^{args.min_exp}..2^{args.max_exp} bytes")
-        print(f"[coll] warmup={args.warmup}  reps={args.reps}  profile={args.profile}")
+        print(f"[bench] world_size={world_size}  backend=neuron")
+        print(f"[bench] sizes={args.sizes}  warmup={args.warmup}  reps={args.reps}")
+        print(f"[bench] peak_per_nd={PEAK_PER_ND} TFLOPS bf16")
 
-    sizes = _msg_sizes_bytes(args.min_exp, args.max_exp)
+    group = dist.group.WORLD
     results: list[dict[str, Any]] = []
 
-    for op_name in args.ops:
+    for size in args.sizes:
+        flops = 2 * size * size * size
+        x = torch.randn(size, size, dtype=torch.bfloat16, device=device)
+
         if rank == 0:
             print(f"\n{'=' * 70}")
-            print(f"[coll] OP: {op_name}")
+            print(f"[bench] SIZE={size}x{size}  flops={flops/1e12:.2f} TFLOPS")
             print(f"{'=' * 70}")
 
-        for size_bytes in sizes:
-            try:
-                r = bench_collective(op_name, size_bytes, rank, world_size,
-                                     args.warmup, args.reps)
-                results.append(r)
-                if rank == 0:
-                    print(f"[coll]   {size_bytes:>12,} B  "
-                          f"lat={r['median_us']:>9.1f} us  "
-                          f"algbw={r['algbw_gbps']:>7.2f} GB/s  "
-                          f"busbw={r['busbw_gbps']:>7.2f} GB/s")
-            except Exception as exc:
-                results.append({
-                    "op": op_name, "size_bytes": size_bytes,
-                    "status": "fail",
-                    "error": f"{type(exc).__name__}: {exc}"[:512],
-                })
-                if rank == 0:
-                    print(f"[coll]   {size_bytes:>12,} B  FAIL: {exc}")
-
-    # Profile the largest size for each op
-    if args.profile:
-        largest_size = sizes[-1]
+        # 1) Matmul only — baseline compute
+        mod_compute = MatmulOnly(size).to(device)
+        r_compute = bench_one("matmul_only", mod_compute, x, flops,
+                              args.warmup, args.reps)
+        r_compute["size"] = size
+        results.append(r_compute)
         if rank == 0:
-            print(f"\n[coll] Profiling largest size ({largest_size:,} B) for each op...")
-        for op_name in args.ops:
-            try:
-                profile_subdir = os.path.join(args.profile_dir, op_name)
-                _run_profiled(op_name, largest_size, rank, world_size,
-                              args.warmup, args.reps, profile_subdir)
-            except Exception as exc:
-                if rank == 0:
-                    print(f"[coll] profile FAIL for {op_name}: {exc}")
+            print(f"[bench]   matmul_only:        {r_compute['median_us']:>8.0f} us  "
+                  f"{r_compute['achieved_tflops']:.1f} TF/s  MFU={r_compute['mfu_pct']:.1f}%")
+
+        # 2) Matmul + all_reduce
+        mod_ar = MatmulAllReduce(size, group).to(device)
+        r_ar = bench_one("matmul+all_reduce", mod_ar, x, flops,
+                         args.warmup, args.reps)
+        r_ar["size"] = size
+        overhead = (r_ar["median_us"] - r_compute["median_us"]) / r_ar["median_us"] * 100
+        r_ar["comm_overhead_pct"] = overhead
+        results.append(r_ar)
+        if rank == 0:
+            print(f"[bench]   matmul+all_reduce:  {r_ar['median_us']:>8.0f} us  "
+                  f"{r_ar['achieved_tflops']:.1f} TF/s  MFU={r_ar['mfu_pct']:.1f}%  "
+                  f"comm_overhead={overhead:.1f}%")
+
+        # 3) Matmul + reduce_scatter
+        mod_rs = MatmulReduceScatter(size, group).to(device)
+        r_rs = bench_one("matmul+reduce_scatter", mod_rs, x, flops,
+                         args.warmup, args.reps)
+        r_rs["size"] = size
+        overhead = (r_rs["median_us"] - r_compute["median_us"]) / r_rs["median_us"] * 100
+        r_rs["comm_overhead_pct"] = overhead
+        results.append(r_rs)
+        if rank == 0:
+            print(f"[bench]   matmul+red_scatter: {r_rs['median_us']:>8.0f} us  "
+                  f"{r_rs['achieved_tflops']:.1f} TF/s  MFU={r_rs['mfu_pct']:.1f}%  "
+                  f"comm_overhead={overhead:.1f}%")
 
     if rank == 0:
         print(f"\n\n{'=' * 90}")
-        print(f"{'OP':<16} {'SIZE':>12} {'LAT(us)':>10} {'ALGBW(GB/s)':>12} {'BUSBW(GB/s)':>12}")
+        print(f"{'NAME':<24} {'SIZE':>6} {'LAT(us)':>9} {'TF/s':>7} {'MFU%':>6} {'COMM%':>6}")
         print(f"{'-' * 90}")
         for r in results:
-            if "median_us" not in r:
-                print(f"{r['op']:<16} {r['size_bytes']:>12,}  FAIL")
-                continue
-            print(f"{r['op']:<16} {r['size_bytes']:>12,} "
-                  f"{r['median_us']:>10.1f} "
-                  f"{r['algbw_gbps']:>12.2f} "
-                  f"{r['busbw_gbps']:>12.2f}")
+            comm = f"{r['comm_overhead_pct']:.1f}" if "comm_overhead_pct" in r else "—"
+            print(f"{r['name']:<24} {r['size']:>6} "
+                  f"{r['median_us']:>9.0f} "
+                  f"{r['achieved_tflops']:>7.1f} "
+                  f"{r['mfu_pct']:>6.1f} "
+                  f"{comm:>6}")
         print(f"{'=' * 90}")
 
         payload = {
@@ -285,16 +202,16 @@ def main() -> None:
             "torch": torch.__version__,
             "torch_neuronx": getattr(torch_neuronx, "__version__", "?"),
             "world_size": world_size,
+            "peak_per_nd_tflops": PEAK_PER_ND,
             "warmup": args.warmup,
             "reps": args.reps,
-            "ops": args.ops,
-            "sizes_bytes": sizes,
+            "sizes": args.sizes,
             "results": results,
         }
         os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
         with open(args.output, "w") as f:
             json.dump(payload, f, indent=2)
-        print(f"\n[coll] wrote {args.output}")
+        print(f"\n[bench] wrote {args.output}")
 
     dist.destroy_process_group()
 
