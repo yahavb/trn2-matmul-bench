@@ -48,6 +48,17 @@ class MatmulAllReduce(nn.Module):
         return funcol.all_reduce(y, reduceOp="sum", group=self.group)
 
 
+class MatmulAllGather(nn.Module):
+    def __init__(self, size: int, group):
+        super().__init__()
+        self.linear = nn.Linear(size, size, bias=False, dtype=torch.bfloat16)
+        self.group = group
+
+    def forward(self, x):
+        y = self.linear(x)
+        return funcol.all_gather_tensor(y, gather_dim=0, group=self.group)
+
+
 class MatmulReduceScatter(nn.Module):
     def __init__(self, size: int, group):
         super().__init__()
@@ -202,7 +213,20 @@ def main() -> None:
                   f"{r_ar['achieved_tflops']:.1f} TF/s  MFU={r_ar['mfu_pct']:.1f}%  "
                   f"comm_overhead={overhead:.1f}%")
 
-        # 3) Matmul + reduce_scatter
+        # 3) Matmul + all_gather
+        mod_ag = MatmulAllGather(size, group).to(device)
+        r_ag = bench_one("matmul+all_gather", mod_ag, x, flops,
+                         args.warmup, args.reps)
+        r_ag["size"] = size
+        overhead = (r_ag["median_us"] - r_compute["median_us"]) / r_ag["median_us"] * 100
+        r_ag["comm_overhead_pct"] = overhead
+        results.append(r_ag)
+        if rank == 0:
+            print(f"[bench]   matmul+all_gather:  {r_ag['median_us']:>8.0f} us  "
+                  f"{r_ag['achieved_tflops']:.1f} TF/s  MFU={r_ag['mfu_pct']:.1f}%  "
+                  f"comm_overhead={overhead:.1f}%")
+
+        # 4) Matmul + reduce_scatter
         mod_rs = MatmulReduceScatter(size, group).to(device)
         r_rs = bench_one("matmul+reduce_scatter", mod_rs, x, flops,
                          args.warmup, args.reps)
