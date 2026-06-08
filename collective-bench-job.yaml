@@ -1,0 +1,163 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: collective-bench
+  namespace: default
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: collective-bench
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        node-type: trn2
+      resourceClaims:
+        - name: m-trn2
+          resourceClaimTemplateName: m-trn2
+      containers:
+        - name: bench
+          image: 421672808698.dkr.ecr.us-east-1.amazonaws.com/concourse-release-0461d3b:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - "-exc"
+            - |
+              set -euxo pipefail
+
+              cd /tmp
+              git clone -b fix/trn3-interm-benchmark https://yahavb:${GITHUB_TOKEN}@github.com/yahavb/trn2-matmul-bench.git
+              cd trn2-matmul-bench
+
+              # ─── Enable Neuron profiler ──────────────────────────────────
+              export NEURON_PROFILE_ENABLE=1
+              export NEURON_PROFILE_DIR=/tmp/neuron_profile
+
+              # ─── Run collective benchmark (2 NDs via torchrun) ───────────
+              echo "============================================"
+              echo "  Collective Ops Benchmark: 2 NDs"
+              echo "============================================"
+
+              torchrun --nproc_per_node=2 /tmp/trn2-matmul-bench/collective_benchmark.py \
+                --ops all_reduce all_gather reduce_scatter \
+                --min-exp 10 \
+                --max-exp 28 \
+                --warmup 5 \
+                --reps 20 \
+                --output /tmp/collective_bench.json \
+                2>&1 | tee /tmp/collective_bench.log
+
+              echo ""
+              echo "Benchmark results:"
+              cat /tmp/collective_bench.json | python3 -m json.tool | tail -60
+
+              # ─── Neuron Explorer: analyze traces ─────────────────────────
+              PROFILE_DEST="/tmp/neuron_profile"
+              if [[ -d "$PROFILE_DEST" && -n "$(ls -A $PROFILE_DEST 2>/dev/null)" ]]; then
+                echo ""
+                echo "============================================"
+                echo "  NEURON EXPLORER ANALYSIS"
+                echo "============================================"
+
+                if [[ -d "$PROFILE_DEST/neffs" ]]; then
+                  for session_dir in $(find "$PROFILE_DEST" -name "*.ntff" -printf '%h\n' 2>/dev/null | sort -u); do
+                    cp "$PROFILE_DEST/neffs/"*.neff "$session_dir/" 2>/dev/null || true
+                  done
+                  echo "Copied NEFFs into session directories"
+                fi
+
+                NTFF_DIR=$(find "$PROFILE_DEST" -name "*.ntff" -printf '%h\n' 2>/dev/null | head -1)
+
+                if [[ -n "$NTFF_DIR" ]]; then
+                  echo "=== neuron-explorer view (summary-text) ==="
+                  neuron-explorer view -d "$NTFF_DIR" \
+                    --output-format summary-text \
+                    2>&1 | tee /tmp/neuron_explorer_summary.txt || true
+
+                  echo ""
+                  echo "=== neuron-explorer view (JSON) ==="
+                  neuron-explorer view -d "$NTFF_DIR" \
+                    --output-format json \
+                    --output-file /tmp/neuron_explorer_profile.json \
+                    2>&1 | tee /tmp/neuron_explorer_view.log || true
+
+                  echo ""
+                  echo "=== NEFF COUNT AND SIZE DISTRIBUTION ==="
+                  find "$NTFF_DIR" -name '*.neff' | wc -l | xargs -I{} echo "Total NEFFs: {}"
+                  find "$NTFF_DIR" -name '*.neff' -exec ls -l '{}' ';' | awk '{print $5}' | sort -n | awk '
+                    BEGIN { count=0; sum=0 }
+                    { sizes[count++]=$1; sum+=$1 }
+                    END {
+                      if (count == 0) { print "No NEFFs found"; exit }
+                      printf "Total size: %.2f MB\n", sum/1024/1024
+                      printf "Min: %d bytes\n", sizes[0]
+                      printf "Max: %d bytes (%.2f MB)\n", sizes[count-1], sizes[count-1]/1024/1024
+                      printf "Median: %d bytes\n", sizes[int(count/2)]
+                    }'
+                else
+                  echo "No NTFF files found in profile directory"
+                fi
+              else
+                echo "WARNING: No profile directory found for neuron-explorer"
+              fi
+
+              # ─── Archive results ─────────────────────────────────────────
+              TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+              ARCHIVE_DIR="/var/mdl/collective_bench/runs/${TIMESTAMP}"
+              echo ""
+              echo "============================================"
+              echo "  ARCHIVING to: $ARCHIVE_DIR"
+              echo "============================================"
+              mkdir -p "$ARCHIVE_DIR"
+              cp /tmp/collective_bench.json "$ARCHIVE_DIR/" 2>/dev/null || true
+              cp /tmp/collective_bench.log "$ARCHIVE_DIR/" 2>/dev/null || true
+              cp /tmp/neuron_explorer_summary.txt "$ARCHIVE_DIR/" 2>/dev/null || true
+              cp /tmp/neuron_explorer_profile.json "$ARCHIVE_DIR/" 2>/dev/null || true
+              cp -r "$PROFILE_DEST" "$ARCHIVE_DIR/profiles" 2>/dev/null || true
+              echo "Archive complete!"
+              ls -la "$ARCHIVE_DIR/"
+
+              echo "═══════════════════════════════════════════"
+              echo "  Done! Collective benchmark complete"
+              echo "═══════════════════════════════════════════"
+          resources:
+            claims:
+              - name: m-trn2
+            requests:
+              cpu: 24
+              memory: 256Gi
+            limits:
+              cpu: 24
+              memory: 256Gi
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: 621547421844-ap-southeast-4-pvc
+              mountPath: /var/mdl
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: NEURON_RT_LOG_LEVEL
+              value: "ERROR"
+            - name: NEURON_CC_LOG_LEVEL
+              value: "ERROR"
+            - name: TORCH_NEURONX_LOG_LEVEL
+              value: "ERROR"
+            - name: NEURON_RT_DBG_INTRA_RDH_CHANNEL_BUFFER_SIZE
+              value: "134217728"
+            - name: NEURON_FALLBACK_ENABLED
+              value: "0"
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: GITHUB_TOKEN
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
+        - name: 621547421844-ap-southeast-4-pvc
+          persistentVolumeClaim:
+            claimName: 621547421844-ap-southeast-4-pvc
