@@ -152,8 +152,7 @@ def main() -> None:
     rank = dist.get_rank()
     world_size = dist.get_world_size()
 
-    # With lnc=2 and 2 NDs: 4 logical NCs total (0,1 on ND0; 2,3 on ND1).
-    # torchrun --nproc_per_node=4 gives ranks 0-3, each maps 1:1 to a logical NC.
+    # 2 NDs × 4 NCs each = 8 NCs total. torchrun --nproc_per_node=8.
     torch.neuron.set_device(rank)
 
     device = f"neuron:{rank}"

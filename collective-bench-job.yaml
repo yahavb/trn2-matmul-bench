@@ -35,7 +35,7 @@ spec:
               echo "  Collective Ops Benchmark: 2 NDs"
               echo "============================================"
 
-              torchrun --nproc_per_node=4 /tmp/trn2-matmul-bench/collective_benchmark.py \
+              torchrun --nproc_per_node=8 /tmp/trn2-matmul-bench/collective_benchmark.py \
                 --sizes 4096 8192 16384 \
                 --warmup 5 \
                 --reps 20 \
