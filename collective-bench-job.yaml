@@ -36,9 +36,9 @@ spec:
               echo "============================================"
 
               torchrun --nproc_per_node=8 /tmp/trn2-matmul-bench/collective_benchmark.py \
-                --sizes 4096 8192 16384 \
+                --sizes 4096 8192 16384 32768 \
                 --warmup 5 \
-                --reps 20 \
+                --reps 10 \
                 --sustain 60 \
                 --output /tmp/collective_bench.json \
                 2>&1 | tee /tmp/collective_bench.log
