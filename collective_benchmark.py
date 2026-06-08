@@ -152,13 +152,11 @@ def main() -> None:
     rank = dist.get_rank()
     world_size = dist.get_world_size()
 
-    # With lnc=2, logical cores 0,1 are on ND0 and 2,3 are on ND1.
-    # Map each rank to a different ND by striding by 2.
-    nc_per_nd = 2  # logical NCs per ND with lnc=2
-    device_id = rank * nc_per_nd
-    torch.neuron.set_device(device_id)
+    # With lnc=2 and 2 NDs: 4 logical NCs total (0,1 on ND0; 2,3 on ND1).
+    # torchrun --nproc_per_node=4 gives ranks 0-3, each maps 1:1 to a logical NC.
+    torch.neuron.set_device(rank)
 
-    device = f"neuron:{device_id}"
+    device = f"neuron:{rank}"
     _ = torch.zeros(1, device=device)
 
     if rank == 0:
