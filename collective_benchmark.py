@@ -21,7 +21,9 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
+import torch.profiler
 import torch_neuronx  # noqa: F401
+from torch_neuronx.profiling import NeuronConfig, NeuronProfiler, ProfileMode
 
 
 def _sync():
@@ -83,7 +85,11 @@ def bench_collective(
     warmup: int,
     reps: int,
 ) -> dict[str, Any]:
-    """Benchmark a single collective op at a given message size."""
+    """Benchmark a single collective op at a given message size.
+
+    Each call compiles a fresh function to avoid Dynamo recompile limits
+    when sweeping different tensor sizes.
+    """
     device = f"neuron:{rank}"
     num_elements = size_bytes // 2  # bf16 = 2 bytes per element
 
@@ -92,6 +98,9 @@ def bench_collective(
 
     x = torch.randn(num_elements, dtype=torch.bfloat16, device=device)
     actual_bytes = num_elements * 2
+
+    # Reset Dynamo before each size so we get a fresh compilation (no recompile limit)
+    torch._dynamo.reset()
 
     group = dist.group.WORLD
     op_fn = OPS[op_name](group)
@@ -131,6 +140,56 @@ def bench_collective(
     }
 
 
+def _run_profiled(
+    op_name: str,
+    size_bytes: int,
+    rank: int,
+    world_size: int,
+    warmup: int,
+    reps: int,
+    profile_dir: str,
+) -> None:
+    """Run a single op+size with Neuron device profiling enabled."""
+    device = f"neuron:{rank}"
+    num_elements = size_bytes // 2
+    if op_name == "reduce_scatter":
+        num_elements = (num_elements // world_size) * world_size
+
+    x = torch.randn(num_elements, dtype=torch.bfloat16, device=device)
+
+    torch._dynamo.reset()
+    group = dist.group.WORLD
+    op_fn = OPS[op_name](group)
+    compiled_fn = torch.compile(op_fn, backend="neuron", dynamic=False)
+
+    # Warmup outside profiler
+    for _ in range(warmup):
+        compiled_fn(x)
+        _sync()
+
+    dist.barrier()
+
+    neuron_config = NeuronConfig(
+        modes=[ProfileMode.DEVICE, ProfileMode.RUNTIME],
+        profile_output_dir=profile_dir,
+    )
+    neuron_profiler = NeuronProfiler(neuron_config)
+
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU],
+        schedule=torch.profiler.schedule(wait=0, warmup=1, active=reps - 1),
+        experimental_config=neuron_config,
+        on_trace_ready=lambda p: neuron_profiler.export_trace(p),
+    ) as prof:
+        for _ in range(reps):
+            compiled_fn(x)
+            _sync()
+            prof.step()
+
+    if rank == 0:
+        print(f"[coll] profile written to {profile_dir}")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Neuron collective ops benchmark")
     p.add_argument("--ops", nargs="+", default=list(OPS.keys()),
@@ -141,6 +200,9 @@ def main() -> None:
                    help="Max message size as 2^N bytes (default: 30 = 1GB)")
     p.add_argument("--warmup", type=int, default=5)
     p.add_argument("--reps", type=int, default=20)
+    p.add_argument("--profile", action="store_true",
+                   help="Enable Neuron device profiling for the largest message size")
+    p.add_argument("--profile-dir", default="/tmp/neuron_profile", dest="profile_dir")
     p.add_argument("--output", default="/tmp/collective_bench.json")
     args = p.parse_args()
 
@@ -159,7 +221,7 @@ def main() -> None:
               f"  torch_neuronx={getattr(torch_neuronx, '__version__', '?')}")
         print(f"[coll] world_size={world_size}  backend=neuron")
         print(f"[coll] ops={args.ops}  sizes=2^{args.min_exp}..2^{args.max_exp} bytes")
-        print(f"[coll] warmup={args.warmup}  reps={args.reps}")
+        print(f"[coll] warmup={args.warmup}  reps={args.reps}  profile={args.profile}")
 
     sizes = _msg_sizes_bytes(args.min_exp, args.max_exp)
     results: list[dict[str, Any]] = []
@@ -188,6 +250,20 @@ def main() -> None:
                 })
                 if rank == 0:
                     print(f"[coll]   {size_bytes:>12,} B  FAIL: {exc}")
+
+    # Profile the largest size for each op
+    if args.profile:
+        largest_size = sizes[-1]
+        if rank == 0:
+            print(f"\n[coll] Profiling largest size ({largest_size:,} B) for each op...")
+        for op_name in args.ops:
+            try:
+                profile_subdir = os.path.join(args.profile_dir, op_name)
+                _run_profiled(op_name, largest_size, rank, world_size,
+                              args.warmup, args.reps, profile_subdir)
+            except Exception as exc:
+                if rank == 0:
+                    print(f"[coll] profile FAIL for {op_name}: {exc}")
 
     if rank == 0:
         print(f"\n\n{'=' * 90}")

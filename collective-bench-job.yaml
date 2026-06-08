@@ -30,10 +30,6 @@ spec:
               git clone -b fix/trn3-interm-benchmark https://yahavb:${GITHUB_TOKEN}@github.com/yahavb/trn2-matmul-bench.git
               cd trn2-matmul-bench
 
-              # ─── Enable Neuron profiler ──────────────────────────────────
-              export NEURON_PROFILE_ENABLE=1
-              export NEURON_PROFILE_DIR=/tmp/neuron_profile
-
               # ─── Run collective benchmark (2 NDs via torchrun) ───────────
               echo "============================================"
               echo "  Collective Ops Benchmark: 2 NDs"
@@ -45,6 +41,8 @@ spec:
                 --max-exp 28 \
                 --warmup 5 \
                 --reps 20 \
+                --profile \
+                --profile-dir /tmp/neuron_profile \
                 --output /tmp/collective_bench.json \
                 2>&1 | tee /tmp/collective_bench.log
 
