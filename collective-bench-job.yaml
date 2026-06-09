@@ -46,7 +46,7 @@ spec:
                 --warmup $WARMUP \
                 --reps $REPS \
                 --output /tmp/collective_bench.json \
-                2>&1 | tee /tmp/bench_single_core.log
+                2>&1 | tee /tmp/bench_single_core.log || true
 
               # ─── Mode 2: single-device (4 LNCs, TP=4, D2D 400 GB/s) ───
               echo ""
@@ -60,7 +60,7 @@ spec:
                 --warmup $WARMUP \
                 --reps $REPS \
                 --output /tmp/collective_bench.json \
-                2>&1 | tee /tmp/bench_single_device.log
+                2>&1 | tee /tmp/bench_single_device.log || true
 
               # ─── Mode 3: multi-device (8 LNCs, TP=8, NeuronLink 128 GB/s) ─
               echo ""
@@ -74,7 +74,7 @@ spec:
                 --warmup $WARMUP \
                 --reps $REPS \
                 --output /tmp/collective_bench.json \
-                2>&1 | tee /tmp/bench_multi_device.log
+                2>&1 | tee /tmp/bench_multi_device.log || true
 
               # ─── Archive results ─────────────────────────────────────────
               TIMESTAMP=$(date +%Y%m%d_%H%M%S)

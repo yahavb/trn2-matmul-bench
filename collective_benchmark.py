@@ -229,18 +229,21 @@ def run_distributed(args, mode: str) -> None:
                   f"{r_ag['achieved_tflops']:.1f} TF/s  MFU={r_ag['mfu_pct']:.1f}%  "
                   f"comm_overhead={overhead:.1f}%")
 
-        # reduce_scatter
-        mod_rs = MatmulReduceScatter(size, group).to(device)
-        r_rs = bench_one("matmul+reduce_scatter", mod_rs, x, flops,
-                         args.warmup, args.reps, use_dist=True)
-        r_rs["size"] = size
-        overhead = (r_rs["median_us"] - r_compute["median_us"]) / r_rs["median_us"] * 100
-        r_rs["comm_overhead_pct"] = overhead
-        results.append(r_rs)
-        if rank == 0:
-            print(f"[bench]   matmul+red_scatter: {r_rs['median_us']:>8.0f} us  "
-                  f"{r_rs['achieved_tflops']:.1f} TF/s  MFU={r_rs['mfu_pct']:.1f}%  "
-                  f"comm_overhead={overhead:.1f}%")
+        # reduce_scatter (skip 16384 with TP=4 — exceeds RDH buffer)
+        if not (size >= 16384 and world_size == 4):
+            mod_rs = MatmulReduceScatter(size, group).to(device)
+            r_rs = bench_one("matmul+reduce_scatter", mod_rs, x, flops,
+                             args.warmup, args.reps, use_dist=True)
+            r_rs["size"] = size
+            overhead = (r_rs["median_us"] - r_compute["median_us"]) / r_rs["median_us"] * 100
+            r_rs["comm_overhead_pct"] = overhead
+            results.append(r_rs)
+            if rank == 0:
+                print(f"[bench]   matmul+red_scatter: {r_rs['median_us']:>8.0f} us  "
+                      f"{r_rs['achieved_tflops']:.1f} TF/s  MFU={r_rs['mfu_pct']:.1f}%  "
+                      f"comm_overhead={overhead:.1f}%")
+        elif rank == 0:
+            print(f"[bench]   matmul+red_scatter: SKIPPED (16384 + TP=4 exceeds RDH buffer)")
 
     if rank == 0:
         _print_summary(results)
