@@ -34,7 +34,7 @@ def _sync():
     torch.neuron.synchronize()
 
 
-PEAK_PER_ND = 167.0  # TFLOPS bf16 per ND (1 logical NC with lnc=2)
+PEAK_PER_NC = 190.0  # TFLOPS bf16 per NeuronCore (trn2 spec)
 
 
 class MatmulAllReduce(nn.Module):
@@ -106,7 +106,7 @@ def bench_one(
 
     med_us = statistics.median(times_us)
     achieved_tflops = flops / med_us / 1e6
-    mfu_pct = achieved_tflops / PEAK_PER_ND * 100.0
+    mfu_pct = achieved_tflops / PEAK_PER_NC * 100.0
 
     return {
         "name": name,
@@ -176,7 +176,7 @@ def main() -> None:
               f"  torch_neuronx={getattr(torch_neuronx, '__version__', '?')}")
         print(f"[bench] world_size={world_size}  backend=neuron")
         print(f"[bench] sizes={args.sizes}  warmup={args.warmup}  reps={args.reps}")
-        print(f"[bench] peak_per_nd={PEAK_PER_ND} TFLOPS bf16")
+        print(f"[bench] peak_per_nd={PEAK_PER_NC} TFLOPS bf16")
 
     group = dist.group.WORLD
     results: list[dict[str, Any]] = []
@@ -254,7 +254,7 @@ def main() -> None:
             tflops = flops * s["iters_per_sec"] / 1e12
             print(f"[bench]   {s['count']} iters in {s['elapsed_s']:.1f}s  "
                   f"= {s['iters_per_sec']:.1f} it/s  "
-                  f"= {tflops:.1f} TF/s  MFU={tflops/PEAK_PER_ND*100:.1f}%")
+                  f"= {tflops:.1f} TF/s  MFU={tflops/PEAK_PER_NC*100:.1f}%")
 
     if rank == 0:
         print(f"\n\n{'=' * 90}")
@@ -275,7 +275,7 @@ def main() -> None:
             "torch": torch.__version__,
             "torch_neuronx": getattr(torch_neuronx, "__version__", "?"),
             "world_size": world_size,
-            "peak_per_nd_tflops": PEAK_PER_ND,
+            "peak_per_nd_tflops": PEAK_PER_NC,
             "warmup": args.warmup,
             "reps": args.reps,
             "sizes": args.sizes,
