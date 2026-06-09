@@ -31,7 +31,7 @@ spec:
               cd trn2-matmul-bench
 
               SCRIPT=/tmp/trn2-matmul-bench/collective_benchmark.py
-              SIZES="4096 8192 16384"
+              SIZES="16384"
               WARMUP=5
               REPS=10
 
@@ -116,7 +116,7 @@ spec:
             - name: TORCH_NEURONX_LOG_LEVEL
               value: "ERROR"
             - name: NEURON_RT_DBG_INTRA_RDH_CHANNEL_BUFFER_SIZE
-              value: "134217728"
+              value: "268435456"
             - name: NEURON_FALLBACK_ENABLED
               value: "0"
             - name: GITHUB_TOKEN
