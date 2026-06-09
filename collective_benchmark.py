@@ -34,7 +34,7 @@ def _sync():
     torch.neuron.synchronize()
 
 
-PEAK_PER_ND = 167.0  # TFLOPS bf16 per ND (1 logical NC with lnc=2)
+PEAK_PER_ND = 158.0  # TFLOPS bf16 per logical NC (79 TFLOPS/physical NC × 2, lnc=2)
 
 
 class MatmulAllReduce(nn.Module):
