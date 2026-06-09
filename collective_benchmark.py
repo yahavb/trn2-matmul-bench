@@ -150,7 +150,7 @@ def bench_sustain(
 def main() -> None:
     p = argparse.ArgumentParser(description="Distributed matmul + collective benchmark")
     p.add_argument("--sizes", nargs="+", type=int,
-                   default=[4096, 8192, 16384, 32768],
+                   default=[4096, 8192, 16384],
                    help="Square matrix sizes (M=K=N)")
     p.add_argument("--warmup", type=int, default=5)
     p.add_argument("--reps", type=int, default=20)
