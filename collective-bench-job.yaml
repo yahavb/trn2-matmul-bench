@@ -27,7 +27,7 @@ spec:
               set -euxo pipefail
 
               cd /tmp
-              git clone -b fix/trn3-interm-benchmark https://yahavb:${GITHUB_TOKEN}@github.com/yahavb/trn2-matmul-bench.git
+              git clone -b feat/trn2-collective-bench https://yahavb:${GITHUB_TOKEN}@github.com/yahavb/trn2-matmul-bench.git
               cd trn2-matmul-bench
 
               # ─── Run collective benchmark (2 NDs via torchrun) ───────────
