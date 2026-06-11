@@ -58,9 +58,10 @@ class MatmulAllReduce(nn.Module):
 
 
 class MatmulAllGather(nn.Module):
-    """Column-parallel matmul + all_gather (reconstruct full output).
+    """Sequence-parallel all_gather + column-parallel matmul.
 
-    Each rank: [size, size] × [size, size//TP] → [size, size//TP] → all_gather dim=1 → [size, size].
+    Each rank holds [size//TP, size] of the activation (seq-parallel shard).
+    all_gather dim=0 → [size, size], then matmul [size, size] × [size, size//TP] → [size, size//TP].
     """
     def __init__(self, size: int, tp_size: int, group):
         super().__init__()
@@ -68,8 +69,8 @@ class MatmulAllGather(nn.Module):
         self.group = group
 
     def forward(self, x):
-        y = self.linear(x)
-        return funcol.all_gather_tensor(y, gather_dim=1, group=self.group)
+        x_full = funcol.all_gather_tensor(x, gather_dim=0, group=self.group)
+        return self.linear(x_full)
 
 
 class MatmulReduceScatter(nn.Module):
@@ -245,10 +246,10 @@ def run_distributed(args, mode: str) -> None:
                   f"{r_ar['achieved_tflops']:.1f} TF/s  MFU={r_ar['mfu_pct']:.1f}%  "
                   f"comm_overhead={overhead:.1f}%")
 
-        # all_gather — column-parallel + reconstruct full output
-        # input: [size, size], weight: [size, size//TP], output: [size, size//TP] → all_gather dim=1
+        # all_gather — seq-parallel input [size//TP, size] → all_gather dim=0 → matmul
+        x_sp = torch.randn(size // world_size, size, dtype=torch.bfloat16, device=device)
         mod_ag = MatmulAllGather(size, world_size, group).to(device)
-        r_ag = bench_one("matmul+all_gather", mod_ag, x_full, per_rank_flops,
+        r_ag = bench_one("matmul+all_gather", mod_ag, x_sp, per_rank_flops,
                          args.warmup, args.reps, use_dist=True)
         r_ag["size"] = size
         overhead = (r_ag["median_us"] - r_compute["median_us"]) / r_ag["median_us"] * 100
