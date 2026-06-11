@@ -43,9 +43,13 @@ def _sync():
 
 
 class MatmulAllReduce(nn.Module):
-    def __init__(self, size: int, group):
+    """Row-parallel matmul + all_reduce (standard Megatron TP pattern).
+
+    Each rank: [size, size//TP] × [size//TP, size] → [size, size] partial → all_reduce.
+    """
+    def __init__(self, size: int, tp_size: int, group):
         super().__init__()
-        self.linear = nn.Linear(size, size, bias=False, dtype=torch.bfloat16)
+        self.linear = nn.Linear(size // tp_size, size, bias=False, dtype=torch.bfloat16)
         self.group = group
 
     def forward(self, x):
@@ -54,20 +58,29 @@ class MatmulAllReduce(nn.Module):
 
 
 class MatmulAllGather(nn.Module):
-    def __init__(self, size: int, group):
+    """Column-parallel matmul + all_gather (reconstruct full output).
+
+    Each rank: [size, size] × [size, size//TP] → [size, size//TP] → all_gather dim=1 → [size, size].
+    """
+    def __init__(self, size: int, tp_size: int, group):
         super().__init__()
-        self.linear = nn.Linear(size, size, bias=False, dtype=torch.bfloat16)
+        self.linear = nn.Linear(size, size // tp_size, bias=False, dtype=torch.bfloat16)
         self.group = group
 
     def forward(self, x):
         y = self.linear(x)
-        return funcol.all_gather_tensor(y, gather_dim=0, group=self.group)
+        return funcol.all_gather_tensor(y, gather_dim=1, group=self.group)
 
 
 class MatmulReduceScatter(nn.Module):
-    def __init__(self, size: int, group):
+    """Column-parallel matmul + reduce_scatter (sequence-parallel pattern).
+
+    Each rank: [size, size] × [size, size//TP] → [size, size//TP] → reduce_scatter dim=0 → [size//TP, size//TP].
+    Payload = size * (size//TP) * 2 bytes (128 MB at 16384/TP=4 vs 512 MB unsharded).
+    """
+    def __init__(self, size: int, tp_size: int, group):
         super().__init__()
-        self.linear = nn.Linear(size, size, bias=False, dtype=torch.bfloat16)
+        self.linear = nn.Linear(size, size // tp_size, bias=False, dtype=torch.bfloat16)
         self.group = group
 
     def forward(self, x):
@@ -76,9 +89,14 @@ class MatmulReduceScatter(nn.Module):
 
 
 class MatmulOnly(nn.Module):
-    def __init__(self, size: int):
+    """Column-parallel matmul baseline — each rank computes 1/TP of output features.
+
+    Each rank: [size, size] × [size, size//TP] → [size, size//TP].
+    FLOPs per rank = 2 * size^2 * (size // TP).
+    """
+    def __init__(self, size: int, tp_size: int = 1):
         super().__init__()
-        self.linear = nn.Linear(size, size, bias=False, dtype=torch.bfloat16)
+        self.linear = nn.Linear(size, size // tp_size, bias=False, dtype=torch.bfloat16)
 
     def forward(self, x):
         return self.linear(x)
@@ -150,7 +168,7 @@ def run_single_core(args) -> None:
         print(f"[bench] SIZE={size}x{size}  flops={flops/1e12:.2f} TFLOPS")
         print(f"{'=' * 70}")
 
-        mod = MatmulOnly(size).to(device)
+        mod = MatmulOnly(size, tp_size=1).to(device)
         r = bench_one("matmul_only", mod, x, flops, args.warmup, args.reps, use_dist=False)
         r["size"] = size
         results.append(r)
@@ -162,7 +180,14 @@ def run_single_core(args) -> None:
 
 
 def run_distributed(args, mode: str) -> None:
-    """Mode 2 & 3: multi-core with collectives."""
+    """Mode 2 & 3: multi-core with collectives.
+
+    Implements proper TP sharding (like Megatron/vLLM):
+    - Column-parallel: weight is [size, size//TP], input is [size, size], output is [size, size//TP]
+    - Row-parallel: weight is [size//TP, size], input is [size, size//TP], output is [size, size]
+
+    Per-rank FLOPs = 2 * size * size * (size // TP)
+    """
     dist.init_process_group("neuron")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
@@ -185,17 +210,19 @@ def run_distributed(args, mode: str) -> None:
     results: list[dict[str, Any]] = []
 
     for size in args.sizes:
-        flops = 2 * size * size * size
-        x = torch.randn(size, size, dtype=torch.bfloat16, device=device)
+        per_rank_flops = 2 * size * size * (size // world_size)
 
         if rank == 0:
             print(f"\n{'=' * 70}")
-            print(f"[bench] SIZE={size}x{size}  flops={flops/1e12:.2f} TFLOPS")
+            print(f"[bench] SIZE={size}x{size}  per_rank_flops={per_rank_flops/1e12:.2f} TFLOPS"
+                  f"  (sharded: {size}x{size} @ {size}x{size // world_size})")
             print(f"{'=' * 70}")
 
-        # matmul only — baseline
-        mod_compute = MatmulOnly(size).to(device)
-        r_compute = bench_one("matmul_only", mod_compute, x, flops,
+        # matmul_only — column-parallel baseline (no collective)
+        # input: [size, size], weight: [size, size//TP], output: [size, size//TP]
+        x_full = torch.randn(size, size, dtype=torch.bfloat16, device=device)
+        mod_compute = MatmulOnly(size, tp_size=world_size).to(device)
+        r_compute = bench_one("matmul_only", mod_compute, x_full, per_rank_flops,
                               args.warmup, args.reps, use_dist=True)
         r_compute["size"] = size
         results.append(r_compute)
@@ -203,9 +230,11 @@ def run_distributed(args, mode: str) -> None:
             print(f"[bench]   matmul_only:        {r_compute['median_us']:>8.0f} us  "
                   f"{r_compute['achieved_tflops']:.1f} TF/s  MFU={r_compute['mfu_pct']:.1f}%")
 
-        # all_reduce
-        mod_ar = MatmulAllReduce(size, group).to(device)
-        r_ar = bench_one("matmul+all_reduce", mod_ar, x, flops,
+        # all_reduce — row-parallel pattern
+        # input: [size, size//TP], weight: [size//TP, size], output: [size, size] → all_reduce
+        x_shard = torch.randn(size, size // world_size, dtype=torch.bfloat16, device=device)
+        mod_ar = MatmulAllReduce(size, world_size, group).to(device)
+        r_ar = bench_one("matmul+all_reduce", mod_ar, x_shard, per_rank_flops,
                          args.warmup, args.reps, use_dist=True)
         r_ar["size"] = size
         overhead = (r_ar["median_us"] - r_compute["median_us"]) / r_ar["median_us"] * 100
@@ -216,9 +245,10 @@ def run_distributed(args, mode: str) -> None:
                   f"{r_ar['achieved_tflops']:.1f} TF/s  MFU={r_ar['mfu_pct']:.1f}%  "
                   f"comm_overhead={overhead:.1f}%")
 
-        # all_gather
-        mod_ag = MatmulAllGather(size, group).to(device)
-        r_ag = bench_one("matmul+all_gather", mod_ag, x, flops,
+        # all_gather — column-parallel + reconstruct full output
+        # input: [size, size], weight: [size, size//TP], output: [size, size//TP] → all_gather dim=1
+        mod_ag = MatmulAllGather(size, world_size, group).to(device)
+        r_ag = bench_one("matmul+all_gather", mod_ag, x_full, per_rank_flops,
                          args.warmup, args.reps, use_dist=True)
         r_ag["size"] = size
         overhead = (r_ag["median_us"] - r_compute["median_us"]) / r_ag["median_us"] * 100
@@ -229,9 +259,10 @@ def run_distributed(args, mode: str) -> None:
                   f"{r_ag['achieved_tflops']:.1f} TF/s  MFU={r_ag['mfu_pct']:.1f}%  "
                   f"comm_overhead={overhead:.1f}%")
 
-        # reduce_scatter
-        mod_rs = MatmulReduceScatter(size, group).to(device)
-        r_rs = bench_one("matmul+reduce_scatter", mod_rs, x, flops,
+        # reduce_scatter — column-parallel + sequence-parallel reduction
+        # input: [size, size], weight: [size, size//TP], output: [size, size//TP] → reduce_scatter dim=0
+        mod_rs = MatmulReduceScatter(size, world_size, group).to(device)
+        r_rs = bench_one("matmul+reduce_scatter", mod_rs, x_full, per_rank_flops,
                          args.warmup, args.reps, use_dist=True)
         r_rs["size"] = size
         overhead = (r_rs["median_us"] - r_compute["median_us"]) / r_rs["median_us"] * 100
