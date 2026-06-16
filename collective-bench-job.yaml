@@ -1,0 +1,134 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: collective-bench
+  namespace: default
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: collective-bench
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        node-type: trn2
+      resourceClaims:
+        - name: m-trn2
+          resourceClaimTemplateName: m-trn2
+      containers:
+        - name: bench
+          image: 421672808698.dkr.ecr.us-east-1.amazonaws.com/concourse-release-0461d3b:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - "-exc"
+            - |
+              set -euxo pipefail
+
+              cd /tmp
+              git clone -b feat/trn2-collective-bench https://yahavb:${GITHUB_TOKEN}@github.com/yahavb/trn2-matmul-bench.git
+              cd trn2-matmul-bench
+
+              SCRIPT=/tmp/trn2-matmul-bench/collective_benchmark.py
+              SIZES="16384"
+              WARMUP=5
+              REPS=10
+
+              # ─── Mode 1: single-core (1 LNC, no TP, no collectives) ────
+              echo "============================================"
+              echo "  Mode 1: single-core (1 LNC, no TP)"
+              echo "============================================"
+
+              NEURON_RT_NUM_CORES=1 python $SCRIPT \
+                --mode single-core \
+                --sizes $SIZES \
+                --warmup $WARMUP \
+                --reps $REPS \
+                --output /tmp/collective_bench.json \
+                2>&1 | tee /tmp/bench_single_core.log || true
+
+              # ─── Mode 2: single-device (4 LNCs, TP=4, D2D 400 GB/s) ───
+              echo ""
+              echo "============================================"
+              echo "  Mode 2: single-device (TP=4, D2D)"
+              echo "============================================"
+
+              NEURON_RT_VISIBLE_CORES=0-3 torchrun --nproc_per_node=4 $SCRIPT \
+                --mode single-device \
+                --sizes $SIZES \
+                --warmup $WARMUP \
+                --reps $REPS \
+                --output /tmp/collective_bench.json \
+                2>&1 | tee /tmp/bench_single_device.log || true
+
+              # ─── Mode 3: multi-device (8 LNCs, TP=8, NeuronLink 128 GB/s) ─
+              echo ""
+              echo "============================================"
+              echo "  Mode 3: multi-device (TP=8, NeuronLink)"
+              echo "============================================"
+
+              torchrun --nproc_per_node=8 $SCRIPT \
+                --mode multi-device \
+                --sizes $SIZES \
+                --warmup $WARMUP \
+                --reps $REPS \
+                --output /tmp/collective_bench.json \
+                2>&1 | tee /tmp/bench_multi_device.log || true
+
+              # ─── Archive results ─────────────────────────────────────────
+              TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+              ARCHIVE_DIR="/var/mdl/collective_bench/runs/${TIMESTAMP}"
+              echo ""
+              echo "============================================"
+              echo "  ARCHIVING to: $ARCHIVE_DIR"
+              echo "============================================"
+              mkdir -p "$ARCHIVE_DIR"
+              cp /tmp/collective_bench_*.json "$ARCHIVE_DIR/" 2>/dev/null || true
+              cp /tmp/bench_*.log "$ARCHIVE_DIR/" 2>/dev/null || true
+              echo "Archive complete!"
+              ls -la "$ARCHIVE_DIR/"
+
+              echo "═══════════════════════════════════════════"
+              echo "  Done! All 3 modes complete"
+              echo "═══════════════════════════════════════════"
+          resources:
+            claims:
+              - name: m-trn2
+            requests:
+              cpu: 24
+              memory: 256Gi
+            limits:
+              cpu: 24
+              memory: 256Gi
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: 621547421844-ap-southeast-4-pvc
+              mountPath: /var/mdl
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: NEURON_RT_LOG_LEVEL
+              value: "ERROR"
+            - name: NEURON_CC_LOG_LEVEL
+              value: "ERROR"
+            - name: TORCH_NEURONX_LOG_LEVEL
+              value: "ERROR"
+            - name: NEURON_RT_DBG_INTRA_RDH_CHANNEL_BUFFER_SIZE
+              value: "268435456"
+            - name: NEURON_FALLBACK_ENABLED
+              value: "0"
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: GITHUB_TOKEN
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
+        - name: 621547421844-ap-southeast-4-pvc
+          persistentVolumeClaim:
+            claimName: 621547421844-ap-southeast-4-pvc

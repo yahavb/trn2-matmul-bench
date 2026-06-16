@@ -1,4 +1,4 @@
-"""Trainium 2 matmul peak microbenchmark — bf16 / fp8 / mxfp8.
+"""Trainium 2/3 matmul peak microbenchmark — bf16 / fp8 / mxfp8.
 
 Two compilation paths are measured for each shape × dtype:
   trace   — torch_neuronx.trace(): AOT XLA compilation (public torch-neuronx only).
@@ -37,12 +37,19 @@ except ImportError:
     _XLA_AVAILABLE = False
 
 
+_FORCE_NEURON_DEVICE = False  # set True when using backend="neuron" (eager path)
+
+
 def _get_device() -> torch.device:
+    if _FORCE_NEURON_DEVICE:
+        return torch.device("neuron")
     return torch_xla.device() if _XLA_AVAILABLE else torch.device("neuron:0")
 
 
 def _sync_device() -> None:
-    if hasattr(torch_neuronx, "synchronize"):
+    if _FORCE_NEURON_DEVICE:
+        torch.neuron.synchronize()
+    elif hasattr(torch_neuronx, "synchronize"):
         torch_neuronx.synchronize()
     elif _XLA_AVAILABLE:
         torch_xla.sync()
@@ -231,7 +238,7 @@ def bench_one(
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="TRN2 matmul peak benchmark")
+    p = argparse.ArgumentParser(description="TRN2/3 matmul peak benchmark")
     p.add_argument("--cases",   nargs="+", default=list(MATMUL_SHAPES.keys()))
     p.add_argument("--dtypes",  nargs="+", default=["bf16", "fp8", "mxfp8"],
                    choices=list(_DTYPE_MODULES))
@@ -254,6 +261,12 @@ def main() -> None:
         print("[bench] WARNING: 'trace' unavailable (Beta 2 package); skipping")
         args.methods = [m for m in args.methods if m != "trace"]
 
+    # When using the "neuron" backend (eager path), force torch.device("neuron")
+    # instead of XLA device, even if torch_xla is importable.
+    global _FORCE_NEURON_DEVICE
+    if args.compile_backend == "neuron":
+        _FORCE_NEURON_DEVICE = True
+
     methods: dict[str, Any] = {}
     if "trace"   in args.methods: methods["trace"]   = _compile_trace
     if "compile" in args.methods: methods["compile"] = _make_compile_jit(args.compile_backend)
@@ -264,6 +277,13 @@ def main() -> None:
     print(f"[bench] hostname={socket.gethostname()}")
     print(f"[bench] methods={args.methods}  dtypes={args.dtypes}  compile_backend={args.compile_backend}")
     print(f"[bench] peak_bf16={args.peak_bf16} TFLOPS  peak_fp8={args.peak_fp8} TFLOPS")
+
+    # Initialize the Neuron device stream pool before any benchmark runs.
+    # Without this, torch.compile may fail with "Stream pool not initialized"
+    # because the device hasn't been touched before the first compiled execution.
+    device = _get_device()
+    _ = torch.zeros(1, device=device)
+    print(f"[bench] device initialized: {device}")
 
     results: list[dict[str, Any]] = bench_overhead(args.warmup, args.reps, methods)
 

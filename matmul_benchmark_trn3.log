@@ -1,0 +1,153 @@
+$ rm -rf ./mxfp8_neff_output/
+python3 mxfp8_compile_neff.py --size 16384
+Compiling MXFP8 MatMul NEFF: 16384x16384x16384
+Output: ./mxfp8_neff_output
+Loading cached inputs from ./mxfp8_input_cache/mxfp8_x4_inputs_16384x16384x16384.npz...
+  LHS data:   (4096, 16384) dtype=float8_e4m3fn_x4
+  LHS scales: (4096, 16384) dtype=uint8
+  RHS data:   (4096, 16384) dtype=float8_e4m3fn_x4
+  RHS scales: (4096, 16384) dtype=uint8
+
+Compiling kernel to NEFF...
+  Running compile_to_bir...
+  Running compile_bir_to_neff...
+
+  NEFF compiled successfully!
+  NEFF path: /home/ubuntu/yidezou/omni_output/mxfp8_neff_output/file.neff
+  MLIR time: 5.8s
+  NEFF time: 24.5s
+
+To profile:
+  NEURON_RT_VISIBLE_CORES=62-63 neuron-profile capture \
+    -n /home/ubuntu/yidezou/omni_output/mxfp8_neff_output/file.neff \
+    -s profile_mxfp8_16384.ntff
+
+  NEURON_RT_VISIBLE_CORES=62-63 neuron-profile view \
+    -n /home/ubuntu/yidezou/omni_output/mxfp8_neff_output/file.neff \
+    -s profile_mxfp8_16384.ntff \
+    --output-format summary-text
+    
+((venv) ) ubuntu@ip-10-0-5-75:~/yidezou/omni_output$ NEURON_RT_VISIBLE_CORES=62-63 neuron-profile capture \
+  -n /home/ubuntu/yidezou/omni_output/mxfp8_neff_output/file.neff \
+  -s profile_mxfp8_16k.ntff
+
+NEURON_RT_VISIBLE_CORES=62-63 neuron-profile view \
+  -n /home/ubuntu/yidezou/omni_output/mxfp8_neff_output/file.neff \
+  -s profile_mxfp8_16k.ntff \
+  --output-format summary-text
+2026-May-14 05:12:07.572290 2838105:2838160  WARN  NMGR:calc_tensor_size                        Unknown dtype 0, assuming 1 byte per element
+2026-May-14 05:12:07.572359 2838105:2838160  WARN  NMGR:calc_tensor_size                        Unknown dtype 0, assuming 1 byte per element
+WARN[0000] NeuronCore buffer usage simulation is disabled for output format summary-text. The output will not include SB and PSUM usage over time values.
+n_246a9d74c5f96c12eb41deee14fdb648f5626163
+    hbm_write_bytes                                   535560192
+    vector_engine_instruction_count                   34824
+    event_count                                       365908
+    software_dynamic_dma_active_time_percent          0.9982309907262682
+    static_dma_packet_count                           254
+    software_dynamic_dma_packet_percent               0.999872888968514
+    dynamic_dma_size_percent                          0.9995376594796935
+    instance_type                                     trn3pds98.48xlarge
+    mfu_inst_estimated_percent                        0.8393409956873759
+    hardware_dynamic_dma_size                         0
+    throttle_activity_0_avg_util_limit_nc0_percent    1
+    hardware_dynamic_dma_active_time_percent          0
+    hardware_dynamic_dma_packet_percent               0
+    cc_op_active_time                                 0
+    mbu_min_read_util_percent                         0.03420848147678022
+    ultraserver_type                                  Switch
+    weight_queue_bytes                                0
+    sync_engine_instruction_count                     39
+    gpsimd_engine_instruction_time                    0.012225466802
+    mm_arithmetic_intensity                           1023.9218630772518
+    mfu_estimated_percent                             0.8393409956873759
+    ultraserver_instance_index                        1
+    adjusted_hardware_flops                           2198519939072
+    throttle_avg_util_limit_nc1_percent               0.9977037289331717
+    dma_queue_count                                   34
+    cc_op_count                                       0
+    nd_idx                                            30
+    static_dma_size                                   3973144
+    mfu_max_achievable_estimated_percent              1
+    hardware_dynamic_dma_packet_count                 0
+    cc_cores_instruction_count                        0
+    inputs_and_weights_size_bytes                     671088640
+    throttle_activity_0_active_time_nc1_percent       0.9977037289331717
+    tensor_engine_active_time                         0.016613757373
+    sync_engine_active_time                           2.601665e-06
+    software_dynamic_dma_size_percent                 0.9995376594796935
+    scalar_engine_instruction_time                    2.97333e-06
+    throttle_activity_0_active_time_nc0_percent       0.9977798630829436
+    vector_engine_active_time_percent                 0.8018782888767966
+    peak_flops_bandwidth_ratio                        66.75993208828523
+    mfu_inst_max_achievable_estimated_percent         1
+    ultraserver_size                                  4
+    throttle_active_nc0_time_ns                       0
+    hardware_flops                                    8794079756288
+    sync_engine_active_time_percent                   0.00015622501456200567
+    dma_active_cycles                                 18160984
+    static_dma_active_time                            0.000231293801
+    dma_transfer_time                                 0
+    dynamic_dma_packet_percent                        0.999872888968514
+    cc_op_time                                        0
+    vector_engine_instruction_time                    0.01916147657
+    nc_idx                                            1
+    inputs_outputs_weights_size_bytes                 1207959552
+    hfu_estimated_percent                             0.8393409751956523
+    total_active_time                                 0.01663762317
+    mfu_hlo_max_achievable_estimated_percent          0
+    ultraserver_id                                    1
+    hbm_read_bytes                                    8053063680
+    psum_read_bytes                                   8388608
+    sbuf_write_bytes                                  8061452288
+    scalar_engine_instruction_count                   48
+    total_time                                        0.016641338998
+    activate_instruction_time                         0
+    software_dynamic_dma_packet_count                 1997999
+    cc_cores_instruction_active_time_percent          0
+    trace_count                                       2695694
+    throttle_active_nc1_time_ns                       0
+    tensor_engine_instruction_count                   269333
+    vector_engine_active_time                         0.013353934927
+    software_dynamic_dma_active_time                  0.015107380539
+    software_dynamic_dma_size                         8589571712
+    collectives_version                               2.0.54928 ()
+    cc_cores_instruction_time                         0
+    sbuf_read_bytes                                   1071120384
+    gpsimd_engine_instruction_count                   27289
+    throttle_avg_util_limit_nc0_percent               0.9977798630829436
+    input_queue_bytes                                 0
+    dma_active_time                                   0.015134152996
+    runtime_version                                   2.0.53389 (4c55a)
+    profiler_version                                  2.0.25305.0%kaena-tools/develop@a563784
+    cc_cores_instruction_active_time                  0
+    mfu_hlo_estimated_percent                         0
+    matmul_instruction_count                          131042
+    dma_transfer_average_bytes                        0
+    static_dma_packet_percent                         0.00012711103148600302
+    compiler_version                                  2.0.254643.0a0+306c5a11
+    cc_op_active_time_percent                         0
+    throttle_activity_0_avg_util_limit_nc1_percent    1
+    tensor_engine_instruction_time                    0.069892315508
+    gpsimd_engine_active_time                         0.01027059397
+    gpsimd_engine_active_time_percent                 0.6167295530069004
+    neuroncore_cycle_count                            19983984
+    dma_packet_time                                   0.304373368495
+    hardware_dynamic_dma_active_time                  0
+    psum_read_sbuf_write_count                        4096
+    psum_read_sbuf_write_bytes                        8388608
+    scalar_engine_active_time_percent                 0.00017599080421721382
+    dynamic_dma_active_time_percent                   0.9982309907262682
+    static_dma_active_time_percent                    0.015282903579812603
+    total_exec_time                                   0.016639235668
+    scalar_engine_active_time                         2.930831e-06
+    dma_active_time_percent                           0.9087769840404977
+    static_dma_size_percent                           0.00046234052030646663
+    driver_version                                    2.120.0 ()
+    output_queue_bytes                                0
+    tensor_engine_active_time_percent                 0.9976244011148836
+    hardware_dynamic_dma_size_percent                 0
+    mbu_estimated_percent                             0.43780174946240247
+    total_active_time_percent                         0.9990574966455761
+    model_flops                                       0
+    sync_engine_instruction_time                      2.624165e-06
+$
